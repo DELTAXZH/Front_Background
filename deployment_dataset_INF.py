@@ -1,8 +1,8 @@
-
-#self supervise dataset AI-inferance    Script  ver： Aug 21th 23:50
+# self supervise dataset AI-inferance    Script  ver： Aug 21th 23:50
 
 import os
 import cv2
+from PIL import Image
 import numpy as np
 
 import copy
@@ -18,8 +18,6 @@ from torch.optim import lr_scheduler
 from torchvision import datasets, models, transforms
 
 from model.ViT import VisionTransformer
-
-
 
 
 def setup_seed(seed):  # setting up the random seed for reproduction
@@ -49,8 +47,8 @@ def imshow(inp, title=None):  # Imshow for Tensor input
     plt.pause(0.001)  # pause a bit so that plots are updated
 
 
-def visualize_model(confidence, preds, inputs, labels, class_names, num_images=4, picpath='./data/2_warwick_CLS/imaging_results', draw_idx=0):
-
+def visualize_model(confidence, preds, inputs, labels, class_names, num_images=4,
+                    picpath='./data/2_warwick_CLS/imaging_results', draw_idx=0):
     if not os.path.exists(picpath):
         os.makedirs(picpath)
 
@@ -66,7 +64,7 @@ def visualize_model(confidence, preds, inputs, labels, class_names, num_images=4
         plt.pause(0.001)
 
         if images_so_far == num_images:
-            picpath = os.path.join(picpath, str(draw_idx)+'_output.jpg')
+            picpath = os.path.join(picpath, str(draw_idx) + '_output.jpg')
             plt.savefig(picpath, dpi=1000)
 
 
@@ -133,7 +131,7 @@ def train_model(model, dataloaders, criterion, optimizer, scheduler, dataset_siz
 
     time_elapsed = time.time() - since
     print(f'Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s\n')
-    print(f'Best Epoch: ',best_epoch_idx )
+    print(f'Best Epoch: ', best_epoch_idx)
     print(f'Best val Acc: {best_acc:4f}')
 
     # load best model weights
@@ -176,13 +174,124 @@ def test_model(model, dataloader, criterion, class_names, dataset_size, check_mi
     print(f'Test Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
 
 
+def find_all_files(root, suffix=None):
+    """
+    Return a list of file paths ended with specific suffix
+    """
+    res = []
+    if type(suffix) is tuple or type(suffix) is list:
+        for root, _, files in os.walk(root):
+            for f in files:
+                if suffix is not None:
+                    status = 0
+                    for i in suffix:
+                        if not f.endswith(i):
+                            pass
+                        else:
+                            status = 1
+                            break
+                    if status == 0:
+                        continue
+                res.append(os.path.join(root, f))
+        return res
+
+    elif type(suffix) is str or suffix is None:
+        for root, _, files in os.walk(root):
+            for f in files:
+                if suffix is not None and not f.endswith(suffix):
+                    continue
+                res.append(os.path.join(root, f))
+        return res
+
+    else:
+        print('type of suffix is not legal :', type(suffix))
+        return -1
+
+
+class PILImageTransform:
+    def __init__(self):
+        pass
+
+    def __call__(self, image):
+        # Trans cv2 BGR image to PIL RGB image
+        b, g, r = cv2.split(image)
+        image = cv2.merge([r, g, b])
+        return Image.fromarray(np.uint8(image))
+
+
+class Front_Background_Dataset(torch.utils.data.Dataset):
+    def __init__(self, input_root, data_transforms=None, edge_size=384, suffix='.jpg'):
+
+        super().__init__()
+
+        self.data_root = input_root
+
+        # get files
+        self.input_ids = sorted(find_all_files(self.data_root, suffix=suffix))
+
+        # to PIL
+        self.PIL_Transform = PILImageTransform()
+
+        # get data augmentation and transform
+        if data_transforms is not None:
+            self.transform = data_transforms
+        else:
+            self.transform = transforms.Compose([transforms.Resize(edge_size), transforms.ToTensor()])
+
+    def __len__(self):
+        return len(self.input_ids)
+
+    def __getitem__(self, idx):
+        # get data path
+        imageName = self.input_ids[idx]
+        # get image id
+        imageID = os.path.split(imageName)[-1].split('.')[0]
+
+        # get data
+        # CV2 0-255 hwc，in totensor step it will be transformed to chw.  ps:PIL(0-1 hwc)
+        image = np.array(cv2.imread(imageName), dtype=np.float32)
+
+        image = self.transform(self.PIL_Transform(image))
+
+        return image, imageID
+
+
+def inferance(model, dataloader, record_dir, result_csv_name='inferance.csv', device='cuda'):
+    if not os.path.exists(record_dir):
+        os.makedirs(record_dir)
+
+    model.eval()
+    print('Inferance')
+    print('-' * 10)
+
+    check_idx = 0
+
+    with open(os.path.join(record_dir, result_csv_name), 'w') as f_log:
+        # Iterate over data.
+        for images, imageIDs in dataloader:
+            images = images.to(device)
+
+            # forward
+            outputs = model(images)
+            confidence, preds = torch.max(outputs, 1)
+
+            pred_labels = preds.cpu().numpy()
+
+            for output_idx in range(len(pred_labels)):
+                f_log.write(str(imageIDs[output_idx]) + ', ' + str(pred_labels[output_idx]) + ', \n')
+                check_idx += 1
+
+        f_log.close()
+        print(str(check_idx) + ' samples are all recorded')
+
+
 # Step 0 : enviroment preparing
 setup_seed(42)
 import matplotlib
+
 matplotlib.use('Agg')
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print('Finished Step 0 : enviroment preparing')
-
 
 # Step 1 : data preparing
 data_dir = r'./data/2_warwick_CLS'
@@ -223,7 +332,6 @@ test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=4, shuffl
 
 print('Finished Step 1 : data preparing')
 
-
 # Step 2 : build a model (Transfer learning)
 model = VisionTransformer(img_size=img_size, num_classes=num_classes, pretrained=True)
 '''
@@ -234,7 +342,6 @@ model.fc = nn.Linear(num_ftrs, num_classes)
 model.to(device)
 
 print('Finished Step 2 : build a model (Transfer learning)')
-
 
 # Step 3 : set optimizer and loss
 criterion = nn.CrossEntropyLoss()
@@ -252,123 +359,16 @@ print('Finished Step 4: start training loop')
 '''
 
 # Step 5: test model
-test_model(model, test_dataloader, criterion, class_names, test_dataset_size, check_minibatch=10, device=device)
-print('Finished Step 5: test model')
+# test_model(model, test_dataloader, criterion, class_names, test_dataset_size, check_minibatch=10, device=device)
+# print('Finished Step 5: test model')
 
 
 
 
+input_root = './data/2_warwick_CLS/private'
 
+inf_dataset=Front_Background_Dataset(input_root,data_transforms=data_transforms['val'])
 
+inf_dataloader =torch.utils.data.DataLoader(inf_dataset, batch_size=4, shuffle=False, num_workers=0)
 
-
-def find_all_files(root, suffix=None):
-    """
-    Return a list of file paths ended with specific suffix
-    """
-    res = []
-    if type(suffix) is tuple or type(suffix) is list:
-        for root, _, files in os.walk(root):
-            for f in files:
-                if suffix is not None:
-                    status = 0
-                    for i in suffix:
-                        if not f.endswith(i):
-                            pass
-                        else:
-                            status = 1
-                            break
-                    if status == 0:
-                        continue
-                res.append(os.path.join(root, f))
-        return res
-
-    elif type(suffix) is str or suffix is None:
-        for root, _, files in os.walk(root):
-            for f in files:
-                if suffix is not None and not f.endswith(suffix):
-                    continue
-                res.append(os.path.join(root, f))
-        return res
-
-    else:
-        print('type of suffix is not legal :', type(suffix))
-        return -1
-
-
-class Front_Background_Dataset(torch.utils.data.Dataset):
-    def __init__(self, input_root, data_transforms=None, edge_size=384, suffix='.jpg'):
-
-        super().__init__()
-
-        self.data_root = os.path.join(input_root, 'data')
-
-        # get files
-        self.input_ids = sorted(find_all_files(self.data_root, suffix=suffix))
-
-        # get data augmentation and transform
-        if data_transforms is not None:
-            self.transform = data_transforms
-        else:
-            self.transform = transforms.Compose([transforms.Resize(edge_size), transforms.ToTensor()])
-
-    def __len__(self):
-        return len(self.input_ids)
-
-    def __getitem__(self, idx):
-        # get data path
-        imageName = self.input_ids[idx]
-        # get image id
-        imageID = os.path.split(imageName)[-1].split('.')[0]# fixme 注意这个是名字，会被稿成tensor，但是我们要序号
-
-        # get data
-        # CV2 0-255 hwc，in totensor step it will be transformed to chw.  ps:PIL(0-1 hwc)
-        image = np.array(cv2.imread(imageName), dtype=np.float32)
-
-        image = self.transform(image)
-
-        return image, imageID
-
-
-def inferance(model, dataloader, record_dir, result_csv_name='inferance.csv', device='cuda'):
-    # todo 想办法在这里，读取所有文件的名字，然后把序号转换为文件名
-    '''
-        input_ids = sorted(find_all_files(self.data_root, suffix=suffix))
-        input_ids[idx] 这样就能读到文件名
-
-        '''
-    if not os.path.exists(record_dir):
-        os.makedirs(record_dir)
-
-    model.eval()
-    print('Inferance')
-    print('-' * 10)
-
-    check_idx = 0
-
-    with open(os.path.join(record_dir, result_csv_name), 'w') as f_log:
-        # Iterate over data.
-        for images, imageIDs in dataloader:
-            images = images.to(device)
-
-            # forward
-            outputs = model(images)
-            confidence, preds = torch.max(outputs, 1)
-
-            pred_labels = preds.cpu().numpy()
-
-            for output_idx in range(len(pred_labels)):
-                # fixme 这里我们需要文件名
-                f_log.write(str(imageIDs[output_idx]) + ', ' + str(pred_labels[output_idx]) + ', \n')
-                check_idx += 1
-
-        f_log.close()
-        print(str(check_idx) + ' samples are all recorded')
-
-
-
-input_root='./data/2_warwick_CLS/private'
-find_all_files(input_root, suffix='.jpg')
-
-
-inferance(model, test_dataloader, record_dir='./data/2_warwick_CLS/private', device=device)
+inferance(model, inf_dataloader, record_dir='./data/2_warwick_CLS/private', device=device)
